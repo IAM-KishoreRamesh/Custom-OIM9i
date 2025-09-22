@@ -1,0 +1,334 @@
+/*
+Oracle Instances side: Create the below custom package which takes care of user and responsibility
+Provisioning. This is done by adding and updating records in FND_USER and FND_USER_RESP_GROUP_DIRECT tables 
+*/
+
+CREATE OR REPLACE package APPS.XX_OIM_PKG as
+ 
+procedure CREATE_USER (
+p_employee_id in varchar2 ,
+p_password in varchar2   ,
+p_description in varchar2,
+p_email_address in varchar2,
+p_status out VARCHAR2,
+p_message out VARCHAR2);
+ 
+procedure ADD_RESPONSIBILITY (
+p_employee_id in varchar2,
+p_resp_app_id in number,
+p_resp_id in number,
+p_description in varchar2,
+p_status out varchar2,
+p_message out VARCHAR2);
+ 
+end;
+/
+ 
+-------------------
+ 
+CREATE OR REPLACE PACKAGE BODY APPS.XX_OIM_PKG
+AS
+    PROCEDURE CREATE_USER (p_employee_id  IN     VARCHAR2
+                         , p_password     IN     VARCHAR2
+                         , p_description  IN     VARCHAR2
+                         , p_email_address IN    VARCHAR2
+                         , p_status          OUT VARCHAR2
+                         , p_message         OUT VARCHAR2)
+    IS
+        PRAGMA AUTONOMOUS_TRANSACTION;
+        v_user_id      NUMBER;
+        v_resp_id      NUMBER;
+        v_resp_appl_id NUMBER;
+        --v_user_id NUMBER;
+        v_user_name    VARCHAR2 (200);
+        v_resp_name    VARCHAR2 (240);
+    BEGIN
+        SELECT application_id, Responsibility_id, responsibility_name
+          INTO v_resp_appl_id, v_resp_id, v_resp_name
+          FROM fnd_responsibility_vl
+         WHERE responsibility_name = 'System Administrator';
+ 
+        SELECT user_id, user_name
+          INTO v_user_id, v_user_name
+          FROM fnd_user
+         WHERE user_name = 'FLS_IM_BATCH';
+ 
+        FND_GLOBAL.APPS_INITIALIZE (user_id => v_user_id, resp_id => v_resp_id, resp_appl_id => v_resp_appl_id);
+ 
+        BEGIN
+            fnd_user_pkg.CreateUser (x_user_name => p_employee_id
+                                   , x_owner     => 'CUST'
+                                   , x_unencrypted_password => p_password
+                                   , x_description => p_description
+                                   , x_email_address => p_email_address);
+            COMMIT;
+        EXCEPTION
+            WHEN OTHERS
+            THEN
+                p_message := 'Exception : ' || SUBSTR (SQLERRM, 1, 500);
+                p_status := 'E';
+        END;
+ 
+        p_status := 'S';
+        p_message := NULL;
+    END;
+ 
+    PROCEDURE ADD_RESPONSIBILITY (p_employee_id  IN     VARCHAR2
+                                , p_resp_app_id  IN     NUMBER
+                                , p_resp_id      IN     NUMBER
+                                , p_description  IN     VARCHAR2
+                                , p_status          OUT VARCHAR2
+                                , p_message         OUT VARCHAR2)
+    IS
+        PRAGMA AUTONOMOUS_TRANSACTION;
+        v_user_id      NUMBER;
+        v_resp_id      NUMBER;
+        v_resp_appl_id NUMBER;
+        --v_user_id NUMBER;
+        v_user_name    VARCHAR2 (200);
+        v_resp_name    VARCHAR2 (240);
+        v_resp_key     VARCHAR2 (200);
+        v_resp_app     VARCHAR2 (200);
+    BEGIN
+        SELECT application_id, responsibility_id, responsibility_name
+          INTO v_resp_appl_id, v_resp_id, v_resp_name
+          FROM fnd_responsibility_vl
+         WHERE responsibility_name = 'System Administrator';
+ 
+        SELECT user_id, user_name
+          INTO v_user_id, v_user_name
+          FROM fnd_user
+         WHERE user_name = 'FLS_IM_BATCH';
+ 
+        DBMS_OUTPUT.put_line ('Initializing FLS_IM_BATCH');
+        FND_GLOBAL.APPS_INITIALIZE (user_id => v_user_id, resp_id => v_resp_id, resp_appl_id => v_resp_appl_id);
+ 
+        SELECT fr.application_id
+             , fr.Responsibility_id
+             , fr.responsibility_name
+             , fr.RESPONSIBILITY_KEY
+             , fa.application_short_name
+          INTO v_resp_appl_id
+             , v_resp_id
+             , v_resp_name
+             , v_resp_key
+             , v_resp_app
+          FROM fnd_responsibility_vl fr, fnd_application fa
+         WHERE fr.responsibility_id = p_resp_id AND fa.application_id = fr.application_id;
+ 
+        DBMS_OUTPUT.put_line ('Value for v_resp_appl_id: ' || v_resp_appl_id);
+        DBMS_OUTPUT.put_line ('Value for v_resp_name: ' || v_resp_name);
+        DBMS_OUTPUT.put_line ('Value for v_resp_key: ' || v_resp_key);
+        DBMS_OUTPUT.put_line ('Value for v_resp_name: ' || v_resp_name);
+ 
+        BEGIN
+            fnd_user_pkg.addresp (username    => p_employee_id
+                                , resp_app    => v_resp_app
+                                , resp_key    => v_resp_key
+                                , security_group => 'STANDARD'
+                                , description => 'Apex Test'
+                                , start_date  => SYSDATE
+                                , end_date    => NULL);
+            COMMIT;
+        EXCEPTION
+            WHEN OTHERS
+            THEN
+                p_message := 'Exception : ' || SUBSTR (SQLERRM, 1, 500);
+                p_status := 'E';
+                DBMS_OUTPUT.put_line ('Error Message p_message: ' || p_message);
+        END;
+ 
+        p_status := 'S';
+        p_message := NULL;
+    END;
+END;
+/
+
+-------------------------------------------
+
+--Create the following package from the APEX side to connect with the instances
+  
+	CREATE OR REPLACE PACKAGE BODY OIMTEST.XX_OIM_REQ AS
+	 
+	  -- Global Variables
+	  g_instance_name          VARCHAR2(20);
+	  g_employee_id            VARCHAR2(60);
+	  g_status                 VARCHAR2(10);
+	  g_error                  VARCHAR2(250);
+	  g_responsibility_name    VARCHAR2(200);
+	  g_process                VARCHAR2(200);
+	 
+	  -- Cursor to fetch responsibilities
+	  CURSOR c_resp(p_notification_id NUMBER) IS
+	    SELECT xrr.resp_req_id,
+	           xrr.req_id,
+	           xrr.responsibility_id,
+	           xrr.responsibility_name,
+	           xra.application_id
+	    FROM xx_oim_request xr
+	         JOIN xx_oim_resp_req xrr ON xr.req_id = xrr.req_id
+	         JOIN xx_oim_notif xon ON xrr.req_id = xon.req_id
+	         JOIN xx_oim_resp_avail xra ON xra.responsibility_id = xrr.responsibility_id
+	    WHERE xr.request_status = 'RM_APPROVED'
+	      AND xon.notification_id = p_notification_id;
+	 
+	  -- Placeholder for error logging
+	  PROCEDURE record_error IS
+	  BEGIN
+	    NULL; -- Add logging logic
+	  END;
+	 
+	  -- Get master data from audit table
+	  PROCEDURE get_master_data(
+	    p_emp_id IN VARCHAR2,
+	    o_pwd OUT VARCHAR2,
+	    o_email OUT VARCHAR2
+	  ) IS
+	  BEGIN
+	    SELECT password, email_primary_work
+	      INTO o_pwd, o_email
+	      FROM xx_oim_master_audit
+	     WHERE employee_id = p_emp_id;
+	  EXCEPTION
+	    WHEN OTHERS THEN
+	      g_status := 'E';
+	      g_error := 'Master Audit retrieval for user ' || p_emp_id || ' ' || SQLERRM;
+	      g_process := 'Retrieve Master Data';
+	      record_error;
+	  END;
+	 
+	  -- Main instance-level logic
+	  PROCEDURE process_instance(
+	    p_dblink_suffix IN VARCHAR2,
+	    p_employee_id   IN VARCHAR2,
+	    p_notification_id IN NUMBER,
+	    p_instance      IN VARCHAR2
+	  ) IS
+	    l_pwd          VARCHAR2(200);
+	    l_email        VARCHAR2(200);
+	    l_user_exists  BOOLEAN := FALSE;
+	    l_usr_status   VARCHAR2(10);
+	    l_usr_message  VARCHAR2(400);
+	    l_resp_status  VARCHAR2(10);
+	    l_resp_message VARCHAR2(400);
+	  BEGIN
+	    get_master_data(p_employee_id, l_pwd, l_email);
+	 
+	    -- Check if user exists in remote DB
+	    BEGIN
+	      EXECUTE IMMEDIATE 'SELECT user_name FROM fnd_user@' || p_dblink_suffix || ' WHERE user_name = :1'
+	        INTO g_employee_id USING p_employee_id;
+	      l_user_exists := TRUE;
+	    EXCEPTION
+	      WHEN NO_DATA_FOUND THEN
+	        l_user_exists := FALSE;
+	    END;
+	 
+	    -- Create user if not exists
+	    IF NOT l_user_exists THEN
+	      EXECUTE IMMEDIATE 'BEGIN XX_OIM_PKG.CREATE_USER@' || p_dblink_suffix || 
+	                        '(:1, :2, :3, :4, :5, :6); END;'
+	        USING p_employee_id, l_pwd, 'User Creation from OIM', l_email, l_usr_status, l_usr_message;
+	    END IF;
+	 
+	    -- Assign responsibilities
+	    FOR r IN c_resp(p_notification_id) LOOP
+	      EXECUTE IMMEDIATE 'BEGIN XX_OIM_PKG.ADD_RESPONSIBILITY@' || p_dblink_suffix || 
+	                        '(:1, :2, :3, :4, :5, :6); END;'
+	        USING p_employee_id, r.application_id, r.responsibility_id, 
+	              'Responsibility Creation from OIM', l_resp_status, l_resp_message;
+	 
+	      IF l_resp_status = 'E' THEN
+	        g_status := 'E';
+	        g_error := 'call ADD_RESPONSIBILITY ' || l_resp_message;
+	        g_process := 'ADD_RESPONSIBILITY';
+	        g_responsibility_name := r.responsibility_name;
+	        record_error;
+	      END IF;
+	    END LOOP;
+	 
+	    COMMIT;
+	 
+	    -- Close DB link to avoid ORA-02020
+	    EXECUTE IMMEDIATE 'ALTER SESSION CLOSE DATABASE LINK ' || p_dblink_suffix;
+	  END;
+	 
+	  -- Public Procedure Entry Point
+	  PROCEDURE PROCESS_RESP_REQ(P_NOTIFICATION_ID IN NUMBER) IS
+	  BEGIN
+	    -- Step 1: Get instance and employee ID
+	    SELECT DISTINCT xr.instance_name
+	      INTO g_instance_name
+	      FROM xx_oim_resp_req xr
+	      JOIN xx_oim_notif xn ON xr.req_id = xn.req_id
+	     WHERE xn.notification_id = P_NOTIFICATION_ID;
+	 
+	    SELECT DISTINCT rsp.created_by
+	      INTO g_employee_id
+	      FROM xx_oim_request rsp
+	      JOIN xx_oim_notif xon ON rsp.req_id = xon.req_id
+	     WHERE rsp.request_status = 'RM_APPROVED'
+	       AND xon.notification_id = P_NOTIFICATION_ID;
+	 
+	    -- Step 2: Route to correct DB link
+	    IF g_instance_name LIKE 'INSTA' THEN
+	      process_instance('APEX_INSTA', g_employee_id, P_NOTIFICATION_ID, g_instance_name);
+	    ELSIF g_instance_name LIKE 'INSTB%' THEN
+	      process_instance('APEX_INSTB', g_employee_id, P_NOTIFICATION_ID, g_instance_name);
+	    ELSIF g_instance_name LIKE 'INSTC%' THEN
+	      process_instance('APEX_INSTC', g_employee_id, P_NOTIFICATION_ID, g_instance_name);
+	    ELSIF g_instance_name LIKE 'INSTD%' THEN
+	      process_instance('APEX_INSTD', g_employee_id, P_NOTIFICATION_ID, g_instance_name);
+	    ELSIF g_instance_name LIKE 'INSTE%' THEN
+	      process_instance('APEX_INSTE', g_employee_id, P_NOTIFICATION_ID, g_instance_name);
+	    ELSE
+	      g_status := 'E';
+	      g_error := 'Unknown instance name: ' || g_instance_name;
+	      g_process := 'Instance Lookup';
+	      record_error;
+	    END IF;
+	  EXCEPTION
+	    WHEN OTHERS THEN
+	      g_status := 'E';
+	      g_error := 'Main Program error: ' || SQLERRM;
+	      g_process := 'PROCESS_RESP_REQ';
+	      record_error;
+	  END;
+	 
+	  -- Dummy function for completeness (required by package spec)
+	  FUNCTION CHECK_USER_EXISTS RETURN BOOLEAN IS
+	  BEGIN
+	    RETURN FALSE; -- Not used here
+	  END;
+	 
+	  -- Dummy CREATE_USER (required by package spec)
+	  PROCEDURE CREATE_USER(
+	    p_instance IN VARCHAR2,
+	    p_employee_id IN NUMBER,
+	    p_password IN VARCHAR2,
+	    p_description IN VARCHAR2,
+	    p_email_address IN VARCHAR2,
+	    p_status OUT VARCHAR2,
+	    p_message OUT VARCHAR2
+	  ) IS
+	  BEGIN
+	    NULL;
+	  END;
+	 
+	  -- Dummy ADD_RESPONSIBILITY (required by package spec)
+	  PROCEDURE ADD_RESPONSIBILITY(
+	    p_instance IN VARCHAR2,
+	    p_employee_id IN NUMBER,
+	    p_resp_app_id IN NUMBER,
+	    p_resp_id IN NUMBER,
+	    p_description IN VARCHAR2,
+	    p_status OUT VARCHAR2,
+	    p_message OUT VARCHAR2
+	  ) IS
+	  BEGIN
+	    NULL;
+	  END;
+	 
+	END XX_OIM_REQ;
+	/
+
