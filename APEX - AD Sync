@@ -1,0 +1,83 @@
+For the password sync between AD and APEX. Such that the user can login with their AD credential
+ 
+
+ 
+To make the sync I have created a PLSQL Function. Make sure to have a necessary privileges like DBMS_LAP, DBA_NETWORK_ACL_PRIVILEGES and DBA_NETWORK_ACLS
+  
+CREATE OR REPLACE FUNCTION custom_ldap_auth (
+    p_username    IN VARCHAR2,   
+    p_password    IN VARCHAR2,   
+    p_ldap_string IN VARCHAR2    
+) RETURN BOOLEAN IS
+    -- LDAP connection config
+    l_ldap_host VARCHAR2(256) := '172.28.29.4';  
+    l_ldap_port     PLS_INTEGER   := 389;           
+    l_bind_dn       VARCHAR2(256) := p_ldap_string;
+    l_bind_pass     VARCHAR2(256) := p_password;
+ 
+    -- LDAP session and search config
+    l_session       DBMS_LDAP.session;
+    l_filter        VARCHAR2(256);
+    l_search_base   VARCHAR2(256) := 'DC=flowserve,DC=net';
+    l_attrs         DBMS_LDAP.string_collection;
+    l_message       DBMS_LDAP.message;
+    l_entry         DBMS_LDAP.message;
+    l_dn            VARCHAR2(512);
+    l_result        PLS_INTEGER;
+BEGIN
+    DBMS_OUTPUT.put_line('[LDAP] Step 1: Initializing session...');
+    DBMS_LDAP.use_exception := TRUE;
+ 
+    -- Step 1: Bind with service account
+    l_session := DBMS_LDAP.init(l_ldap_host, l_ldap_port);
+    
+    DBMS_OUTPUT.put_line('[LDAP] Step 2: Binding as service account...');
+    l_result := DBMS_LDAP.simple_bind_s(l_session, l_bind_dn, l_bind_pass);
+ 
+    -- Step 2: Search for user DN
+    l_filter := '(sAMAccountName=' || p_username || ')';
+    l_attrs(1) := 'distinguishedName';
+    DBMS_OUTPUT.put_line('[LDAP] Step 3: Searching for user with filter: ' || l_filter);
+ 
+    l_result := DBMS_LDAP.search_s(
+        ld        => l_session,
+        base      => l_search_base,
+        scope     => DBMS_LDAP.scope_subtree,
+        filter    => l_filter,
+        attrs     => l_attrs,
+        attronly  => 0,
+        res       => l_message
+    );
+ 
+    l_entry := DBMS_LDAP.first_entry(l_session, l_message);
+    IF l_entry IS NOT NULL THEN
+        l_dn := DBMS_LDAP.get_dn(l_session, l_entry);
+        DBMS_OUTPUT.put_line('[LDAP] Step 4: Found user DN: ' || l_dn);
+ 
+        -- Step 3: Re-bind using user's DN + password
+        DBMS_OUTPUT.put_line('[LDAP] Step 5: Trying bind as user...');
+        l_result := DBMS_LDAP.simple_bind_s(l_session, l_dn, p_password);
+        l_result := DBMS_LDAP.unbind_s(l_session);
+ 
+        DBMS_OUTPUT.put_line('[LDAP] Authentication SUCCESS');
+        RETURN TRUE;
+    ELSE
+        DBMS_OUTPUT.put_line('[LDAP] User not found in directory.');
+        l_result := DBMS_LDAP.unbind_s(l_session);
+        RETURN FALSE;
+    END IF;
+ 
+EXCEPTION
+    WHEN OTHERS THEN
+        DBMS_OUTPUT.put_line('[LDAP] EXCEPTION: ' || SQLERRM);
+        IF l_session IS NOT NULL THEN
+            BEGIN
+                l_result := DBMS_LDAP.unbind_s(l_session);
+            EXCEPTION
+                WHEN OTHERS THEN NULL;
+            END;
+        END IF;
+        RETURN FALSE;
+END;
+/
+
