@@ -1,0 +1,416 @@
+DECLARE
+    -- Step-1: Retrieve Login User
+    V_USERNAME VARCHAR2(30) := :APP_USER;
+    V_FIRST_NAME VARCHAR2(100);
+    V_LAST_NAME VARCHAR2(100);
+    
+    -- Step-2: Notification and Request Details
+    V_NOTIF_ID NUMBER := :P6_NOTIF_ID;
+    V_REQ_ID NUMBER;
+    V_NOTIF_STATUS VARCHAR2(30);
+    V_REQ_STATUS VARCHAR2(30);
+    V_REQ_CREATED_BY VARCHAR2(30);
+    V_INSTANCE VARCHAR2(30);
+ 
+    -- Step-3: Manager Details
+    V_MGR_ID VARCHAR2(20);
+    V_MGR_MAIL VARCHAR2(30);
+    V_MGR_NAME VARCHAR2(50);
+ 
+    -- Step-5: Mail Config
+    V_FROM_ADDR VARCHAR2(30) := 'test@oimtest.com';
+    V_SUBJECT VARCHAR2(100);
+    V_BODY CLOB;
+    V_HYPERLINK VARCHAR2(200);
+ 
+    -- Step-6: Next_Level Mail Notification Details
+    V_REQ_EMAIL VARCHAR2(100);
+    V_REQ_SUBJECT VARCHAR2(200);
+    V_REQ_BODY CLOB;
+ 
+    --Functional Approver's block
+    V_FUNC_EMP_ID VARCHAR2(16);
+    V_FUNC_EMP_NAME VARCHAR2(50);
+    
+    --Release Manager Approver's block
+    V_RM_EMP_ID VARCHAR2(16);
+    V_RM_EMP_NAME VARCHAR2(50);
+ 
+    -- Cursor for functional approvers
+    CURSOR FUNC_APPR_CUR IS
+        SELECT EMPLOYEE_ID, FIRST_NAME || ' ' || LAST_NAME FULL_NAME, EMAIL_PRIMARY_WORK
+        FROM XX_OIM_MASTER_AUDIT
+        WHERE APPROVER_TYPE = 'FUNC_APPROVED'
+        ORDER BY EMPLOYEE_ID;
+         
+    -- Cursor for Release Manager approvers
+    CURSOR RM_APPR_CUR IS
+        SELECT EMPLOYEE_ID, FIRST_NAME || ' ' || LAST_NAME FULL_NAME, EMAIL_PRIMARY_WORK
+        FROM XX_OIM_MASTER_AUDIT
+        WHERE APPROVER_TYPE = 'RM_APPROVED'
+        ORDER BY EMPLOYEE_ID;
+         
+BEGIN
+    -- Step-2: Retrieve Notification and Request Info
+    SELECT XON.REQ_ID, XON.NOTIFICATION_STATUS, XON.REQUEST_STATUS, XOR.CREATED_BY
+      INTO V_REQ_ID, V_NOTIF_STATUS, V_REQ_STATUS, V_REQ_CREATED_BY
+      FROM XX_OIM_NOTIF XON
+      JOIN XX_OIM_REQUEST XOR ON XON.REQ_ID = XOR.REQ_ID
+     WHERE XON.NOTIFICATION_ID = V_NOTIF_ID;
+ 
+    SELECT DISTINCT INSTANCE_NAME
+    INTO V_INSTANCE
+    FROM XX_OIM_RESP_REQ
+    WHERE REQ_ID = V_REQ_ID;
+    
+    -- Step-3: Find Requestor's Manager
+    SELECT XOMA.MANAGER_ID, XOMA.MANAGER, XOMA.MANAGER_EMAIL, XOMA.FIRST_NAME, XOMA.LAST_NAME 
+      INTO V_MGR_ID, V_MGR_NAME, V_MGR_MAIL, V_FIRST_NAME, V_LAST_NAME
+      FROM XX_OIM_MASTER_AUDIT XOMA
+     WHERE EMPLOYEE_ID = V_REQ_CREATED_BY;
+     
+    -- Functional block
+    BEGIN
+        SELECT DISTINCT XOMA.EMPLOYEE_ID, FIRST_NAME || ' ' || LAST_NAME FULL_NAME
+        INTO V_FUNC_EMP_ID, V_FUNC_EMP_NAME
+        FROM XX_OIM_NOTIF XON
+        JOIN XX_OIM_MASTER_AUDIT XOMA ON XON.MAIL_TO_USRID = XOMA.EMPLOYEE_ID
+        WHERE XOMA.APPROVER_TYPE = 'FUNC_APPROVED'
+        AND XOMA.EMPLOYEE_ID = V_USERNAME;
+    EXCEPTION
+        WHEN NO_DATA_FOUND THEN
+            V_FUNC_EMP_ID := NULL;
+            V_FUNC_EMP_NAME := NULL;
+    END;
+ 
+    -- RM block
+    BEGIN
+        SELECT DISTINCT XOMA.EMPLOYEE_ID, FIRST_NAME || ' ' || LAST_NAME FULL_NAME
+        INTO V_RM_EMP_ID, V_RM_EMP_NAME
+        FROM XX_OIM_NOTIF XON
+        JOIN XX_OIM_MASTER_AUDIT XOMA ON XON.MAIL_TO_USRID = XOMA.EMPLOYEE_ID
+        WHERE XOMA.APPROVER_TYPE = 'RM_APPROVED'
+        AND XOMA.EMPLOYEE_ID = V_USERNAME;
+    EXCEPTION
+        WHEN NO_DATA_FOUND THEN
+            V_RM_EMP_ID := NULL;
+            V_RM_EMP_NAME := NULL;
+    END;
+ 
+    -- Step-4: Validation for Status and Approver
+    IF V_REQ_STATUS = 'NOTIFIED' AND V_MGR_ID = V_USERNAME THEN
+ 
+        -- Step-5: Update Notification and Request Status
+        UPDATE XX_OIM_NOTIF
+           SET NOTIFICATION_STATUS = 'COMPLETED',
+               REQUEST_STATUS = 'MGR_APPROVED',
+               LAST_UPDATE_DATE = APEX_APPLICATION.G_SYSDATE,
+               LAST_UPDATED_BY = V_USERNAME,
+               LAST_LOGIN_BY = V_USERNAME
+         WHERE NOTIFICATION_ID = V_NOTIF_ID;
+ 
+        UPDATE XX_OIM_REQUEST
+           SET REQUEST_STATUS = 'MGR_APPROVED',
+               LAST_UPDATE_DATE = APEX_APPLICATION.G_SYSDATE,
+               LAST_UPDATED_BY = V_USERNAME,
+               LAST_LOGIN_BY = V_USERNAME
+         WHERE REQ_ID = V_REQ_ID;
+ 
+        -- Step-6: Track Changes in History Table
+        XX_OIM_CALLS.INSERT_INTO_OIM_REQ_APPR_HIST(
+          P_INSTANCE_NAME    => V_INSTANCE,
+          P_APPR_ID      => XX_OIM_APPROV_SEQ.NEXTVAL,
+          P_APPR_NAME    => V_USERNAME,
+          P_APPR_STATUS  => 'MGR_APPROVED',
+          P_NOTIF_ID         => V_NOTIF_ID,
+          P_USERNAME => V_USERNAME
+        );
+        
+        -- Step-7: Notify Functional Approvers (multiple)
+        FOR FUNC_REC IN FUNC_APPR_CUR LOOP
+ 
+            SELECT XX_OIM_RESP_NOTIF_SEQ.NEXTVAL INTO V_NOTIF_ID FROM DUAL;
+            
+            -- Compose Email Body
+            V_BODY := 'Good Day,' || CHR(10) || CHR(10) ||
+                      'Request ID: ' || V_REQ_ID || CHR(10) ||
+                      'Instance: ' || V_INSTANCE || CHR(10) || CHR(10) ||  
+                      'The Manager ' || V_MGR_NAME || ' has requested approval for the following responsibilities:' || CHR(10);
+ 
+            FOR RESP_REC IN (
+            SELECT DISTINCT XORR.RESPONSIBILITY_NAME
+              FROM XX_OIM_RESP_REQ XORR
+              JOIN XX_OIM_NOTIF XON ON XORR.REQ_ID = XON.REQ_ID
+             WHERE XON.REQ_ID = V_REQ_ID
+            )LOOP
+            
+            V_BODY := V_BODY || CHR(10) || UNISTR('\2022') || ' ' || RESP_REC.RESPONSIBILITY_NAME;
+            
+            END LOOP;
+ 
+            -- Hyperlink
+            V_HYPERLINK := 'http://azborcdbd01.flowserve.net:8080/apex/' ||  APEX_PAGE.GET_URL(p_page => 6, p_items => 'P6_NOTIF_ID', p_values => V_NOTIF_ID);
+ 
+            V_BODY := V_BODY || CHR(10) || CHR(10) || 'View Details: ' || V_HYPERLINK || CHR(10) || CHR(10) || 'Thank you' || CHR(10) ||'Regards, Oracle APEX Team';
+ 
+            V_SUBJECT := 'FUNCTIONAL APPROVAL REQUIRED [CECORDEV]';
+ 
+            -- Insert Notification Record for each functional approver
+            XX_OIM_CALLS.INSERT_INTO_OIM_NOTIF(
+                P_NOTIF_ID => V_NOTIF_ID
+                ,P_TO_ADDR => FUNC_REC.EMAIL_PRIMARY_WORK
+                ,P_SUBJECT => V_SUBJECT
+                ,P_BODY => V_BODY
+                ,P_MAIL_TO_USRID => FUNC_REC.EMPLOYEE_ID 
+                ,P_NOTIF_STATUS => 'NOTIFIED'
+                ,P_REQ_STATUS => 'MGR_APPROVED'
+                ,P_REQ_CREATED_BY => V_USERNAME 
+                ,P_REQ_ID => V_REQ_ID
+                ,P_USERNAME => V_USERNAME
+             );
+             
+            -- Send email
+            APEX_MAIL.SEND(
+                p_to    => FUNC_REC.EMAIL_PRIMARY_WORK,
+                p_from  => V_FROM_ADDR,
+                p_subj  => V_SUBJECT,
+                p_body  => V_BODY
+            );
+ 
+        END LOOP;
+ 
+        -- Step-8: Notify Requestor
+        BEGIN
+            SELECT EMAIL_PRIMARY_WORK INTO V_REQ_EMAIL
+              FROM XX_OIM_MASTER_AUDIT
+             WHERE EMPLOYEE_ID = V_REQ_CREATED_BY;
+ 
+            V_REQ_SUBJECT := 'Manager Approval Completed for Your Request [CECORDEV]';
+            V_REQ_BODY := 'Good Day, ' || CHR(10) || CHR(10) ||
+                          'Request ID: ' || V_REQ_ID || CHR(10) ||
+                          'Instance: ' || V_INSTANCE || CHR(10) || CHR(10) ||     
+                          'Request approved at Manager Level by: '|| V_MGR_NAME ||  CHR(10) || CHR(10) ||
+                          'Thank you.' || CHR(10) || 'Regards, Oracle APEX Team';
+ 
+            -- Send email to Requestor
+            APEX_MAIL.SEND(
+                p_to    => V_REQ_EMAIL,
+                p_from  => V_FROM_ADDR,
+                p_subj  => V_REQ_SUBJECT,
+                p_body  => V_REQ_BODY
+            );
+ 
+        EXCEPTION
+            WHEN OTHERS THEN
+                RAISE_APPLICATION_ERROR (-20009, 'Error notifying requestor after Manager Approval: ' || SQLERRM);
+        END;
+ 
+        -- Final Commit
+        COMMIT;  
+    
+    --Step-5: Validation for Status
+    ELSIF V_REQ_STATUS = 'MGR_APPROVED' AND V_FUNC_EMP_ID = V_USERNAME THEN
+        
+        -- Step-5: Update Notification and Request Status
+        UPDATE XX_OIM_NOTIF
+           SET NOTIFICATION_STATUS = 'COMPLETED',
+               REQUEST_STATUS = 'FUNC_APPROVED',
+               LAST_UPDATE_DATE = APEX_APPLICATION.G_SYSDATE,
+               LAST_UPDATED_BY = V_USERNAME,
+               LAST_LOGIN_BY = V_USERNAME
+         WHERE NOTIFICATION_ID = V_NOTIF_ID;
+ 
+        UPDATE XX_OIM_REQUEST
+           SET REQUEST_STATUS = 'FUNC_APPROVED',
+               LAST_UPDATE_DATE = APEX_APPLICATION.G_SYSDATE,
+               LAST_UPDATED_BY = V_USERNAME,
+               LAST_LOGIN_BY = V_USERNAME
+         WHERE REQ_ID = V_REQ_ID;
+ 
+        -- Step-6: Track Changes in History Table                
+        XX_OIM_CALLS.INSERT_INTO_OIM_REQ_APPR_HIST(
+          P_INSTANCE_NAME    => V_INSTANCE,
+          P_APPR_ID      => XX_OIM_APPROV_SEQ.NEXTVAL,
+          P_APPR_NAME    => V_USERNAME,
+          P_APPR_STATUS  => 'FUNC_APPROVED',
+          P_NOTIF_ID         => V_NOTIF_ID,
+          P_USERNAME => V_USERNAME
+        );
+        -- Step-7: Notify Functional Approvers (multiple)
+        FOR RM_REC IN RM_APPR_CUR LOOP
+            
+            SELECT XX_OIM_RESP_NOTIF_SEQ.NEXTVAL INTO V_NOTIF_ID FROM DUAL;
+            -- Compose Email Body
+            V_BODY := 'Good Day, ' || CHR(10) ||
+                      'Request ID: ' || V_REQ_ID || CHR(10) ||
+                      'Instance: ' || V_INSTANCE || CHR(10) || CHR(10) || 
+                      'The Functional user ' || V_FUNC_EMP_NAME ||' (' || V_FUNC_EMP_ID || ') '||'has requested approval for the following responsibilities:' || CHR(10);
+ 
+            FOR RESP_REC IN (
+            SELECT DISTINCT XORR.RESPONSIBILITY_NAME
+              FROM XX_OIM_RESP_REQ XORR
+              JOIN XX_OIM_NOTIF XON ON XORR.REQ_ID = XON.REQ_ID
+             WHERE XON.REQ_ID = V_REQ_ID
+            )LOOP
+            
+            V_BODY := V_BODY || CHR(10) || UNISTR('\2022') || ' ' || RESP_REC.RESPONSIBILITY_NAME;
+            
+            END LOOP;
+ 
+            -- Hyperlink
+            V_HYPERLINK := 'http://azborcdbd01.flowserve.net:8080/apex/' || 
+                            APEX_PAGE.GET_URL(p_page => 6, p_items => 'P6_NOTIF_ID', p_values => V_NOTIF_ID);
+ 
+            V_BODY := V_BODY || CHR(10) || 'View Details: ' || V_HYPERLINK || CHR(10) || 'Regards, Oracle APEX Team';
+ 
+            V_SUBJECT := 'RM APPROVAL REQUIRED [CECORDEV]';
+ 
+            -- Insert Notification Record for each functional approver
+            
+            XX_OIM_CALLS.INSERT_INTO_OIM_NOTIF(
+                P_NOTIF_ID => XX_OIM_RESP_NOTIF_SEQ.CURRVAL
+                ,P_TO_ADDR => RM_REC.EMAIL_PRIMARY_WORK
+                ,P_SUBJECT => V_SUBJECT
+                ,P_BODY => V_BODY
+                ,P_MAIL_TO_USRID => RM_REC.EMPLOYEE_ID 
+                ,P_NOTIF_STATUS => 'NOTIFIED'
+                ,P_REQ_STATUS => 'FUNC_APPROVED'
+                ,P_REQ_CREATED_BY => V_USERNAME 
+                ,P_REQ_ID => V_REQ_ID
+                ,P_USERNAME => V_USERNAME
+             );
+             
+            -- Send email
+            APEX_MAIL.SEND(
+                p_to    => RM_REC.EMAIL_PRIMARY_WORK,
+                p_from  => V_FROM_ADDR,
+                p_subj  => V_SUBJECT,
+                p_body  => V_BODY
+            );
+ 
+        END LOOP;
+        
+        -- Step-8: Notify Requestor
+        BEGIN
+            SELECT EMAIL_PRIMARY_WORK INTO V_REQ_EMAIL
+              FROM XX_OIM_MASTER_AUDIT
+             WHERE EMPLOYEE_ID = V_REQ_CREATED_BY;
+ 
+            V_REQ_SUBJECT := 'Functional Approval Completed for Your Request [CECORDEV]';
+            V_REQ_BODY := 'Good Day, '|| CHR(10) || CHR(10) ||
+                          'Request ID: ' || V_REQ_ID || CHR(10) ||
+                          'Instance: ' || V_INSTANCE || CHR(10) || CHR(10) || 
+                          'Request approved at Functional Level by:' || V_FUNC_EMP_NAME || '(' || V_USERNAME || ').' || CHR(10) || CHR(10) ||
+                          'Thank you.' || CHR(10) || 'Regards, Oracle APEX Team';
+ 
+            -- Send email to Requestor
+            APEX_MAIL.SEND(
+                p_to    => V_REQ_EMAIL,
+                p_from  => V_FROM_ADDR,
+                p_subj  => V_REQ_SUBJECT,
+                p_body  => V_REQ_BODY
+            );
+ 
+        EXCEPTION
+            WHEN OTHERS THEN
+                RAISE_APPLICATION_ERROR (-200010, 'Error notifying requestor after Functional Approval: ' || SQLERRM);
+        END;
+        
+    ELSIF V_REQ_STATUS = 'FUNC_APPROVED' AND V_RM_EMP_ID = V_USERNAME THEN
+    
+        -- Step-5: Update Notification and Request Status
+        UPDATE XX_OIM_NOTIF
+           SET NOTIFICATION_STATUS = 'COMPLETED',
+               REQUEST_STATUS = 'RM_APPROVED',
+               LAST_UPDATE_DATE = APEX_APPLICATION.G_SYSDATE,
+               LAST_UPDATED_BY = V_USERNAME,
+               LAST_LOGIN_BY = V_USERNAME
+         WHERE NOTIFICATION_ID = V_NOTIF_ID;
+ 
+        UPDATE XX_OIM_REQUEST
+           SET REQUEST_STATUS = 'RM_APPROVED',
+               LAST_UPDATE_DATE = APEX_APPLICATION.G_SYSDATE,
+               LAST_UPDATED_BY = V_USERNAME,
+               LAST_LOGIN_BY = V_USERNAME
+         WHERE REQ_ID = V_REQ_ID;
+ 
+        -- Step-6: Track Changes in History Table
+        XX_OIM_CALLS.INSERT_INTO_OIM_REQ_APPR_HIST(
+          P_INSTANCE_NAME    => V_INSTANCE,
+          P_APPR_ID      => XX_OIM_APPROV_SEQ.NEXTVAL,
+          P_APPR_NAME    => V_USERNAME,
+          P_APPR_STATUS  => 'RM_APPROVED',
+          P_NOTIF_ID         => V_NOTIF_ID,
+          P_USERNAME => V_USERNAME
+        );
+        
+        -- Insert Notification Record for each functional approver
+            XX_OIM_CALLS.INSERT_INTO_OIM_NOTIF(
+                P_NOTIF_ID => XX_OIM_RESP_NOTIF_SEQ.NEXTVAL
+                ,P_TO_ADDR => V_REQ_EMAIL
+                ,P_SUBJECT => V_SUBJECT
+                ,P_BODY => V_BODY
+                ,P_MAIL_TO_USRID => V_REQ_CREATED_BY 
+                ,P_NOTIF_STATUS => 'NOTIFIED'
+                ,P_REQ_STATUS => 'RM_APPROVED'
+                ,P_REQ_CREATED_BY => V_USERNAME 
+                ,P_REQ_ID => V_REQ_ID
+                ,P_USERNAME => V_USERNAME
+             );
+        -- Step-8: Notify Requestor
+        BEGIN
+            SELECT EMAIL_PRIMARY_WORK INTO V_REQ_EMAIL
+              FROM XX_OIM_MASTER_AUDIT
+             WHERE EMPLOYEE_ID = V_REQ_CREATED_BY;
+ 
+            V_REQ_SUBJECT := 'Release Manager Approval Completed for Your Request [CECORDEV]';
+            V_REQ_BODY := 'Good Day, '|| CHR(10) || CHR(10) ||
+                          'Request ID: ' || V_REQ_ID || CHR(10) ||
+                          'Instance: ' || V_INSTANCE || CHR(10) || CHR(10) || 
+                          'Request approved at Release Manager Level by:' || V_RM_EMP_NAME || '(' || V_USERNAME || ').' || CHR(10) || CHR(10) ||
+                          'Thank you.' || CHR(10) || 'Regards, Oracle APEX Team';
+ 
+            -- Send email to Requestor
+            APEX_MAIL.SEND(
+                p_to    => V_REQ_EMAIL,
+                p_from  => V_FROM_ADDR,
+                p_subj  => V_REQ_SUBJECT,
+                p_body  => V_REQ_BODY
+            );
+ 
+        EXCEPTION
+            WHEN OTHERS THEN
+                RAISE_APPLICATION_ERROR (-200011, 'Error notifying requestor after Functional Approval: ' || SQLERRM);
+        END;        
+ 
+        -- Dispatch to correct instance-specific implementation
+        BEGIN
+          IF V_INSTANCE LIKE 'FC1%' THEN
+            XX_OIM_REQ_FCO.PROCESS_RESP_REQ(P_NOTIFICATION_ID => V_NOTIF_ID);
+          ELSIF V_INSTANCE LIKE 'SR1%' THEN
+            XX_OIM_REQ_STA.PROCESS_RESP_REQ(P_NOTIFICATION_ID => V_NOTIF_ID);
+          ELSIF V_INSTANCE LIKE 'CP1%' THEN
+            XX_OIM_REQ_GSS.PROCESS_RESP_REQ(P_NOTIFICATION_ID => V_NOTIF_ID);
+          ELSIF V_INSTANCE LIKE 'EP1%' THEN
+            XX_OIM_REQ_EPE.PROCESS_RESP_REQ(P_NOTIFICATION_ID => V_NOTIF_ID);
+          ELSIF V_INSTANCE LIKE 'IP1%' THEN
+            XX_OIM_REQ_IPE.PROCESS_RESP_REQ(P_NOTIFICATION_ID => V_NOTIF_ID);
+          ELSE
+            RAISE_APPLICATION_ERROR(-20032, 'Invalid instance name: ' || V_INSTANCE);
+          END IF;
+        END;
+ 
+    ELSE
+        RAISE_APPLICATION_ERROR(-20030, 'Request is either not in NOTIFIED status or the user isn''t the right Approver.');
+    END IF;
+ 
+EXCEPTION
+    WHEN NO_DATA_FOUND THEN
+        RAISE_APPLICATION_ERROR(-20001, 'No data found.');
+    WHEN TOO_MANY_ROWS THEN
+        RAISE_APPLICATION_ERROR(-20002, 'Too many rows found.');
+    WHEN OTHERS THEN
+        RAISE_APPLICATION_ERROR(-20999, 'Unhandled error: ' || SQLERRM);
+    
+END;
+
