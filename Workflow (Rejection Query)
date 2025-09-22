@@ -1,0 +1,252 @@
+DECLARE
+    -- Step-1: Retrieve Login User
+    V_USERNAME      VARCHAR2(16) := :APP_USER;
+    V_FIRST_NAME    VARCHAR2(50);
+    V_LAST_NAME     VARCHAR2(50);
+ 
+    -- Step-2: Notification and Request Details
+    V_NOTIF_ID      NUMBER := :P6_NOTIF_ID;
+    V_REQ_ID        NUMBER;
+    V_NOTIF_STATUS  VARCHAR2(30);
+    V_REQ_STATUS    VARCHAR2(30);
+    V_REQ_CREATED_BY VARCHAR2(30);
+    V_INSTANCE      VARCHAR2(30);
+ 
+    -- Step-3: Manager Details
+    V_MGR_ID        VARCHAR2(20);
+    V_MGR_MAIL      VARCHAR2(100);
+    V_MGR_NAME      VARCHAR2(100);
+ 
+    -- Step-5: Mail Config
+    V_FROM_ADDR     VARCHAR2(50) := 'test@oimtest.com';
+    V_SUBJECT       VARCHAR2(200);
+    V_BODY          CLOB;
+ 
+    -- Step-6: Next_Level Mail Notification Details
+    V_REQ_EMAIL     VARCHAR2(100);
+    V_REQ_SUBJECT   VARCHAR2(200);
+    V_REQ_BODY      CLOB;
+    V_REQ_NAME      VARCHAR2(100);
+ 
+    -- Functional Approver's block
+    V_FUNC_EMP_ID   VARCHAR2(16);
+    V_FUNC_EMP_NAME VARCHAR2(100);
+ 
+    -- Release Manager Approver's block
+    V_RM_EMP_ID     VARCHAR2(16);
+    V_RM_EMP_NAME   VARCHAR2(100);
+ 
+    -- For RM-level new notification
+    V_NEW_NOTIF_ID  NUMBER;
+ 
+BEGIN
+    -- Step-2: Retrieve Notification and Request Info
+    SELECT XON.REQ_ID, XON.NOTIFICATION_STATUS, XON.REQUEST_STATUS, XOR.CREATED_BY
+    INTO V_REQ_ID, V_NOTIF_STATUS, V_REQ_STATUS, V_REQ_CREATED_BY
+    FROM XX_OIM_NOTIF XON
+    JOIN XX_OIM_REQUEST XOR ON XON.REQ_ID = XOR.REQ_ID
+    WHERE XON.NOTIFICATION_ID = V_NOTIF_ID;
+ 
+    SELECT DISTINCT INSTANCE_NAME
+    INTO V_INSTANCE
+    FROM XX_OIM_RESP_REQ
+    WHERE REQ_ID = V_REQ_ID;
+ 
+    -- Step-3: Find Requestor's Manager and Requestor's details
+    SELECT XOMA.MANAGER_ID, XOMA.MANAGER_EMAIL, XOMA.FIRST_NAME, XOMA.LAST_NAME
+    INTO V_MGR_ID, V_MGR_MAIL, V_FIRST_NAME, V_LAST_NAME
+    FROM XX_OIM_MASTER_AUDIT XOMA
+    WHERE EMPLOYEE_ID = V_REQ_CREATED_BY;
+ 
+    -- Functional Approver Block
+    BEGIN
+        SELECT DISTINCT XOMA.EMPLOYEE_ID, FIRST_NAME || ' ' || LAST_NAME FULL_NAME
+        INTO V_FUNC_EMP_ID, V_FUNC_EMP_NAME
+        FROM XX_OIM_NOTIF XON
+        JOIN XX_OIM_MASTER_AUDIT XOMA ON XON.MAIL_TO_USRID = XOMA.EMPLOYEE_ID
+        WHERE XOMA.APPROVER_TYPE = 'FUNC_APPROVED'
+          AND XOMA.EMPLOYEE_ID = V_USERNAME;
+    EXCEPTION
+        WHEN NO_DATA_FOUND THEN
+            V_FUNC_EMP_ID := NULL;
+            V_FUNC_EMP_NAME := NULL;
+    END;
+ 
+    -- Release Manager Block
+    BEGIN
+        SELECT DISTINCT XOMA.EMPLOYEE_ID, FIRST_NAME || ' ' || LAST_NAME FULL_NAME
+        INTO V_RM_EMP_ID, V_RM_EMP_NAME
+        FROM XX_OIM_NOTIF XON
+        JOIN XX_OIM_MASTER_AUDIT XOMA ON XON.MAIL_TO_USRID = XOMA.EMPLOYEE_ID
+        WHERE XOMA.APPROVER_TYPE = 'RM_APPROVED'
+          AND XOMA.EMPLOYEE_ID = V_USERNAME;
+    EXCEPTION
+        WHEN NO_DATA_FOUND THEN
+            V_RM_EMP_ID := NULL;
+            V_RM_EMP_NAME := NULL;
+    END;
+ 
+    ---------------------------------------------------------------------
+    -- Step-4: Validation for Status and Approver
+    ---------------------------------------------------------------------
+ 
+    -- Manager Level Rejection
+    IF V_REQ_STATUS = 'NOTIFIED' AND V_MGR_ID = V_USERNAME THEN
+        UPDATE XX_OIM_NOTIF
+        SET NOTIFICATION_STATUS = 'COMPLETED',
+            REQUEST_STATUS      = 'REJECTED',
+            LAST_UPDATE_DATE    = APEX_APPLICATION.G_SYSDATE,
+            LAST_UPDATED_BY     = V_USERNAME,
+            LAST_LOGIN_BY       = V_USERNAME
+        WHERE NOTIFICATION_ID = V_NOTIF_ID;
+ 
+        UPDATE XX_OIM_REQUEST
+        SET REQUEST_STATUS     = 'REJECTED',
+            LAST_UPDATE_DATE   = APEX_APPLICATION.G_SYSDATE,
+            LAST_UPDATED_BY    = V_USERNAME,
+            LAST_LOGIN_BY      = V_USERNAME
+        WHERE REQ_ID = V_REQ_ID;
+ 
+        XX_OIM_CALLS.INSERT_INTO_OIM_REQ_APPR_HIST(
+            P_INSTANCE_NAME => V_INSTANCE,
+            P_APPR_ID       => XX_OIM_APPROV_SEQ.NEXTVAL,
+            P_APPR_NAME     => V_USERNAME,
+            P_APPR_STATUS   => 'MGR_REJECTED',
+            P_NOTIF_ID      => V_NOTIF_ID,
+            P_USERNAME      => V_USERNAME
+        );
+ 
+        -- Notify Requestor
+        BEGIN
+            SELECT FIRST_NAME || ' ' || LAST_NAME FULL_NAME, EMAIL_PRIMARY_WORK
+            INTO V_REQ_NAME, V_REQ_EMAIL
+            FROM XX_OIM_MASTER_AUDIT
+            WHERE EMPLOYEE_ID = V_REQ_CREATED_BY;
+ 
+            V_REQ_SUBJECT := 'REQUEST REJECTED AT MANAGER LEVEL [CECORDEV]';
+            V_REQ_BODY    := 'Good Day,' || CHR(10) || CHR(10) ||
+                             'Request ID: ' || V_REQ_ID || CHR(10) ||
+                             'Instance: '  || V_INSTANCE || CHR(10) || CHR(10) ||
+                             'Request REJECTED at Manager Level by: '|| V_FIRST_NAME || ' ' || V_LAST_NAME || ' ('||V_USERNAME||')' || CHR(10) || CHR(10) ||
+                             'Thank you.' || CHR(10) || 'Regards, Oracle APEX Team';
+ 
+            APEX_MAIL.SEND(p_to => V_REQ_EMAIL, p_from => V_FROM_ADDR, p_subj => V_REQ_SUBJECT, p_body => V_REQ_BODY);
+        END;
+ 
+        COMMIT;
+ 
+    -- Functional Level Rejection
+    ELSIF V_REQ_STATUS = 'MGR_APPROVED' AND V_FUNC_EMP_ID = V_USERNAME THEN
+        UPDATE XX_OIM_NOTIF
+        SET NOTIFICATION_STATUS = 'COMPLETED',
+            REQUEST_STATUS      = 'REJECTED',
+            LAST_UPDATE_DATE    = APEX_APPLICATION.G_SYSDATE,
+            LAST_UPDATED_BY     = V_USERNAME,
+            LAST_LOGIN_BY       = V_USERNAME
+        WHERE NOTIFICATION_ID = V_NOTIF_ID;
+ 
+        UPDATE XX_OIM_REQUEST
+        SET REQUEST_STATUS     = 'REJECTED',
+            LAST_UPDATE_DATE   = APEX_APPLICATION.G_SYSDATE,
+            LAST_UPDATED_BY    = V_USERNAME,
+            LAST_LOGIN_BY      = V_USERNAME
+        WHERE REQ_ID = V_REQ_ID;
+ 
+        XX_OIM_CALLS.INSERT_INTO_OIM_REQ_APPR_HIST(
+            P_INSTANCE_NAME => V_INSTANCE,
+            P_APPR_ID       => XX_OIM_APPROV_SEQ.NEXTVAL,
+            P_APPR_NAME     => V_USERNAME,
+            P_APPR_STATUS   => 'FUNC_REJECTED',
+            P_NOTIF_ID      => V_NOTIF_ID,
+            P_USERNAME      => V_USERNAME
+        );
+ 
+        -- Notify Requestor
+        BEGIN
+            SELECT EMAIL_PRIMARY_WORK
+            INTO V_REQ_EMAIL
+            FROM XX_OIM_MASTER_AUDIT
+            WHERE EMPLOYEE_ID = V_REQ_CREATED_BY;
+ 
+            V_REQ_SUBJECT := 'REQUEST REJECTED AT FUNCTIONAL LEVEL [CECORDEV]';
+            V_REQ_BODY    := 'Good Day,' || CHR(10) || CHR(10) ||
+                             'Request ID: ' || V_REQ_ID || CHR(10) ||
+                             'Instance: '  || V_INSTANCE || CHR(10) || CHR(10) ||
+                             'Request REJECTED at Functional Level by: '|| V_FUNC_EMP_NAME || ' ('||V_USERNAME||')' || CHR(10) || CHR(10) ||
+                             'Thank you.' || CHR(10) || 'Regards, Oracle APEX Team';
+ 
+            APEX_MAIL.SEND(p_to => V_REQ_EMAIL, p_from => V_FROM_ADDR, p_subj => V_REQ_SUBJECT, p_body => V_REQ_BODY);
+        END;
+ 
+    -- Release Manager Level Rejection
+    ELSIF V_REQ_STATUS = 'FUNC_APPROVED' AND V_RM_EMP_ID = V_USERNAME THEN
+        UPDATE XX_OIM_NOTIF
+        SET NOTIFICATION_STATUS = 'COMPLETED',
+            REQUEST_STATUS      = 'REJECTED',
+            LAST_UPDATE_DATE    = APEX_APPLICATION.G_SYSDATE,
+            LAST_UPDATED_BY     = V_USERNAME,
+            LAST_LOGIN_BY       = V_USERNAME
+        WHERE NOTIFICATION_ID = V_NOTIF_ID;
+ 
+        UPDATE XX_OIM_REQUEST
+        SET REQUEST_STATUS     = 'REJECTED',
+            LAST_UPDATE_DATE   = APEX_APPLICATION.G_SYSDATE,
+            LAST_UPDATED_BY    = V_USERNAME,
+            LAST_LOGIN_BY      = V_USERNAME
+        WHERE REQ_ID = V_REQ_ID;
+ 
+        XX_OIM_CALLS.INSERT_INTO_OIM_REQ_APPR_HIST(
+            P_INSTANCE_NAME => V_INSTANCE,
+            P_APPR_ID       => XX_OIM_APPROV_SEQ.NEXTVAL,
+            P_APPR_NAME     => V_USERNAME,
+            P_APPR_STATUS   => 'RM_REJECTED',
+            P_NOTIF_ID      => V_NOTIF_ID,
+            P_USERNAME      => V_USERNAME
+        );
+ 
+        -- Generate a new Notification ID for RM rejection
+        SELECT XX_OIM_RESP_NOTIF_SEQ.NEXTVAL INTO V_NEW_NOTIF_ID FROM dual;
+ 
+        XX_OIM_CALLS.INSERT_INTO_OIM_NOTIF(
+            P_NOTIF_ID       => V_NEW_NOTIF_ID,
+            P_TO_ADDR        => V_REQ_EMAIL,
+            P_SUBJECT        => 'REQUEST REJECTED AT RM LEVEL [CECORDEV]',
+            P_BODY           => 'Request ID: '||V_REQ_ID||' has been rejected at RM level.',
+            P_MAIL_TO_USRID  => V_REQ_CREATED_BY,
+            P_NOTIF_STATUS   => 'COMPLETED',
+            P_REQ_STATUS     => 'REJECTED',
+            P_REQ_CREATED_BY => V_REQ_CREATED_BY,
+            P_REQ_ID         => V_REQ_ID,
+            P_USERNAME       => V_USERNAME
+        );
+ 
+        -- Notify Requestor
+        BEGIN
+            SELECT EMAIL_PRIMARY_WORK
+            INTO V_REQ_EMAIL
+            FROM XX_OIM_MASTER_AUDIT
+            WHERE EMPLOYEE_ID = V_REQ_CREATED_BY;
+ 
+            V_REQ_SUBJECT := 'REQUEST REJECTED AT RM LEVEL [CECORDEV]';
+            V_REQ_BODY    := 'Good Day,' || CHR(10) || CHR(10) ||
+                             'Request ID: ' || V_REQ_ID || CHR(10) ||
+                             'Instance: '  || V_INSTANCE || CHR(10) || CHR(10) ||
+                             'Request REJECTED at Release Manager Level by: '|| V_RM_EMP_NAME || ' ('||V_USERNAME||')' || CHR(10) || CHR(10) ||
+                             'Thank you.' || CHR(10) || 'Regards, Oracle APEX Team';
+ 
+            APEX_MAIL.SEND(p_to => V_REQ_EMAIL, p_from => V_FROM_ADDR, p_subj => V_REQ_SUBJECT, p_body => V_REQ_BODY);
+        END;
+ 
+    ELSE
+        RAISE_APPLICATION_ERROR(-20030, 'Request is either not in correct status or the user isn''t the right Approver.');
+    END IF;
+ 
+EXCEPTION
+    WHEN NO_DATA_FOUND THEN
+        RAISE_APPLICATION_ERROR(-20001, 'No data found.');
+    WHEN TOO_MANY_ROWS THEN
+        RAISE_APPLICATION_ERROR(-20002, 'Too many rows found.');
+    WHEN OTHERS THEN
+        RAISE_APPLICATION_ERROR(-20999, 'Unhandled error: ' || SQLERRM);
+END;
+
